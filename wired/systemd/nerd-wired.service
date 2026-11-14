@@ -1,0 +1,26 @@
+# Example systemd unit (Linux). wired/linux/install.sh writes this for you; this is the manual version.
+# Copy to /etc/systemd/system/, create /etc/nerd-wired.conf (below), then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now nerd-wired
+#   journalctl -u nerd-wired -f
+#
+# /etc/nerd-wired.conf:
+#   NERD_PORT=auto                  # or /dev/ttyAMA0 (Pi header), /dev/ttyS3 (Orange Pi 5 UART3)...
+#   NERD_POOL=public-pool.io:21496
+#   NERD_USER=YOUR_BTC_ADDRESS.wired
+#   NERD_WIRED_STATE=/var/lib/nerd-wired
+[Unit]
+Description=Wired NerdMiner relay (ESP32-S3 on a UART)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/nerd-wired.conf
+# the user must be able to open the serial port (group dialout on Debian/Raspberry Pi OS, uucp on Arch)
+# and write NERD_WIRED_STATE
+User=pi
+ExecStart=/usr/bin/python3 /home/pi/NerdMiner-UARTurbo/wired/relay/wired_relay.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

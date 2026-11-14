@@ -1,0 +1,73 @@
+#!/bin/sh
+# nerd-wired: day-to-day control of the wired NerdMiner relay installed by wired/linux/install.sh
+set -eu
+CONF=${NERD_WIRED_CONF:-/etc/nerd-wired.conf}
+OPT=${NERD_WIRED_OPT:-/opt/nerd-wired}
+[ -r "$CONF" ] && { set -a; . "$CONF"; set +a; }
+STATE=${NERD_WIRED_STATE:-/var/lib/nerd-wired}
+export NERD_WIRED_STATE=$STATE
+PY="python3"
+
+send() { printf '%s\n' "$*" >> "$STATE/cmd"; }
+show() { sleep 1.5; tail -n 3 "$STATE/relay.log" 2>/dev/null || true; }
+
+case "${1:-help}" in
+status)
+  [ -r "$STATE/status.json" ] || { echo "no status yet ($STATE/status.json): is the relay running and the board wired?"; exit 1; }
+  $PY - "$STATE/status.json" <<'EOF'
+import json, sys, time
+s = json.load(open(sys.argv[1])); b = s.get("board") or {}
+age = time.time() - s.get("t", 0)
+print("hashrate   %s kH/s%s" % (s.get("khs"), "   (status is %d s old: board or wire down?)" % age if age > 10 else ""))
+print("clock      %s MHz   engine %s   safe-mode %s" % (b.get("mhz"), b.get("mode"), b.get("safe")))
+print("shares     accepted %s   rejected %s   bad (wrong hash) %s   stale %s" % (
+    s.get("accepted"), s.get("rejected"), s.get("bad_cand"), s.get("stale")))
+print("board      boots %s   last hello: %s" % (s.get("boots"), s.get("last_hello")))
+EOF
+  ;;
+log) exec tail -n 30 -F "$STATE/relay.log" ;;
+run) exec $PY "$OPT/relay/wired_relay.py" ;;
+check) shift; exec $PY "$OPT/tools/wirecheck.py" "$@" ;;
+ports) exec $PY "$OPT/relay/nerdport.py" ;;
+ota) shift; [ $# -ge 1 ] || { echo "usage: nerd-wired ota NerdminerV2-Wired_firmware.bin"; exit 2; }
+  exec $PY "$OPT/tools/wireota.py" "$@" ;;
+pin)
+  [ "$(id -u)" = 0 ] || { echo "run as root: sudo nerd-wired pin [/dev/ttyUSBx]"; exit 1; }
+  shift; rule=$($PY "$OPT/relay/nerdport.py" --udev "$@")
+  printf '%s' "$rule" > /etc/udev/rules.d/99-nerdminer.rules
+  udevadm control --reload && udevadm trigger --subsystem-match=tty
+  sleep 1; echo "$rule"; ls -l /dev/nerdminer 2>/dev/null || echo "(replug the adapter if /dev/nerdminer didn't appear)"
+  ;;
+oc|mhz)
+  case "${2:-}" in
+    240) d=8 m=0 ;; 260) d=9 m=20 ;; 280) d=10 m=20 ;; 300) d=11 m=48 ;;
+    "") cat "$STATE/oc.json" 2>/dev/null || echo '{"div": 8, "mode": 0}'; exit 0 ;;
+    *) echo "usage: nerd-wired mhz 240|260|280|300"; exit 2 ;;
+  esac
+  printf '{"div": %s, "mode": %s}\n' $d $m > "$STATE/oc.json.tmp" && mv "$STATE/oc.json.tmp" "$STATE/oc.json"
+  id nerdminer >/dev/null 2>&1 && chown nerdminer "$STATE/oc.json" 2>/dev/null || true
+  send R; echo "saved ${2} MHz; rebooting the board, the relay applies it 30 s after the board's hello"
+  ;;
+cmd) shift; send "$*"; show ;;
+reboot) send R; echo "sent R" ;;
+voltage) shift; send "V ${1:-}"; show ;;
+unsafe) send Z; echo "crash guard cleared, board rebooting" ;;
+start|stop|restart)
+  if [ -d /run/systemd/system ]; then exec systemctl "$1" nerd-wired; else exec rc-service nerd-wired "$1"; fi ;;
+*)
+  cat <<'EOF'
+nerd-wired status          hashrate, clock, shares, reboots
+nerd-wired log             follow the relay log
+nerd-wired check           test the wire both ways (pauses the relay a few seconds)
+nerd-wired check --loopback   test the USB-UART adapter alone (jumper its TXD to RXD)
+nerd-wired ports           USB-UART adapters this computer sees, and what --port auto picks
+sudo nerd-wired pin [dev]  name the adapter /dev/nerdminer (udev), so it survives replugs/renumbering
+nerd-wired mhz [240|260|280|300]   show / set the overclock (reboots the board)
+nerd-wired ota FILE.bin    update the board's firmware over the wire (*_firmware.bin)
+nerd-wired reboot          reboot the board          nerd-wired voltage [n]   read/set core voltage code
+nerd-wired unsafe          clear the crash guard     nerd-wired cmd <X ...>   raw relay command
+nerd-wired start|stop|restart    the service         nerd-wired run           relay in the foreground
+settings: /etc/nerd-wired.conf (then: nerd-wired restart)     state: /var/lib/nerd-wired
+EOF
+  ;;
+esac
